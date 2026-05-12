@@ -9,6 +9,7 @@ local Config = {
     InteractDelay = 0.3,
     PollRate = 0.8,
     TotalPuddles = 8,
+    HoldDuration = 0.7,
 }
 
 local Players = game:GetService("Players")
@@ -39,15 +40,10 @@ local function getHRP()
     return lp.Character:FindFirstChild("HumanoidRootPart")
 end
 
-local function pressE()
+local function holdE(duration)
     keypress(0x45)
-    task.wait(0.05)
+    task.wait(duration or Config.HoldDuration)
     keyrelease(0x45)
-end
-
-local function zeroPrompt(prompt)
-    if not ppOffset or not prompt then return end
-    pcall(memory_write, "float", prompt.Address + ppOffset, 0)
 end
 
 local function dist3D(a, b)
@@ -137,8 +133,17 @@ end
 
 local function cleanAndWait(part)
     local prompt = part:FindFirstChildOfClass("ProximityPrompt")
-    if prompt then zeroPrompt(prompt) end
-    pressE()
+
+    -- Read actual HoldDuration from the prompt, fall back to config
+    local holdTime = Config.HoldDuration
+    if prompt then
+        local okH, hd = pcall(function() return prompt.HoldDuration end)
+        if okH and type(hd) == "number" and hd > 0 then
+            holdTime = hd + 0.1
+        end
+    end
+
+    holdE(holdTime)
 
     local t0 = os.clock()
     while os.clock() - t0 < Config.CleanWaitMax do
@@ -147,10 +152,8 @@ local function cleanAndWait(part)
             task.wait(Config.InteractDelay)
             return true
         end
-        if (os.clock() - t0) % 0.5 < Config.CleanCheckRate then
-            pressE()
-        end
     end
+
     return not isCleanable(part)
 end
 
@@ -249,6 +252,6 @@ UI.AddTab("Clean Job", function(tab)
     end)
 end)
 
-notify("Auto Clean Job v1 loaded! Press J to toggle.", "Street Life", 3)
+notify("Auto Clean Job v1.1 loaded! Press J to toggle.", "Street Life", 3)
 
 while running do task.wait(60) end
