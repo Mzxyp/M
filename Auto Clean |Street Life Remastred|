@@ -1,4 +1,4 @@
--- Auto Clean Job — Street Life Remastered v1
+-- Auto Clean Job — Street Life Remastered v1.1
 
 local Config = {
     Enabled = false,
@@ -10,26 +10,19 @@ local Config = {
     PollRate = 0.8,
     TotalPuddles = 8,
     HoldDuration = 0.7,
+    Debug = false,
 }
 
 local Players = game:GetService("Players")
 local HttpService = game:GetService("HttpService")
 
 local ppOffset = nil
-local cfOffsets = nil
-
--- Load Offsets
 task.spawn(function()
     local ok, res = pcall(game.HttpGet, game, "https://offsets.ntgetwritewatch.workers.dev/offsets.json")
     if ok and res then
         local dok, data = pcall(HttpService.JSONDecode, HttpService, res)
-        if dok and data then
-            if data.ProximityPromptHoldDuraction then
-                ppOffset = tonumber(data.ProximityPromptHoldDuraction, 16)
-            end
-            if data.Primitive and data.CFrame and data.Velocity then
-                cfOffsets = data
-            end
+        if dok and data and data.ProximityPromptHoldDuraction then
+            ppOffset = tonumber(data.ProximityPromptHoldDuraction, 16)
         end
     end
 end)
@@ -51,57 +44,19 @@ local function dist3D(a, b)
     local dx = b.X - a.X
     local dy = b.Y - a.Y
     local dz = b.Z - a.Z
-    return math.sqrt(dx*dx + dy*dy + dz*dz)
+    return math.sqrt(dx * dx + dy * dy + dz * dz)
 end
 
--- Optimized Tween
 local function tweenTo(targetPos, speed)
-    if not cfOffsets then
-        notify("Offsets not loaded yet!", "Clean Job", 3)
-        return false
-    end
     local hrp = getHRP()
     if not hrp then return false end
 
-    local okP, prim = pcall(memory_read, "uintptr", hrp.Address + cfOffsets.Primitive)
-    if not okP or not prim or prim <= 4096 then return false end
-
-    local cf = cfOffsets.CFrame
-    local vel = cfOffsets.Velocity
-
     local ex, ey, ez = targetPos.X, targetPos.Y + 3.5, targetPos.Z
+    local startPos = hrp.Position
+    local dist = (startPos - Vector3.new(ex, ey, ez)).Magnitude
 
-    local function writePos(px, py, pz)
-        pcall(function()
-            memory_write("float", prim + cf + 0x00, 1)
-            memory_write("float", prim + cf + 0x04, 0)
-            memory_write("float", prim + cf + 0x08, 0)
-            memory_write("float", prim + cf + 0x0C, 0)
-            memory_write("float", prim + cf + 0x10, 1)
-            memory_write("float", prim + cf + 0x14, 0)
-            memory_write("float", prim + cf + 0x18, 0)
-            memory_write("float", prim + cf + 0x1C, 0)
-            memory_write("float", prim + cf + 0x20, 1)
-            memory_write("float", prim + cf + 0x24, px)
-            memory_write("float", prim + cf + 0x28, py)
-            memory_write("float", prim + cf + 0x2C, pz)
-            memory_write("float", prim + vel, 0)
-            memory_write("float", prim + vel + 4, 0)
-            memory_write("float", prim + vel + 8, 0)
-        end)
-    end
-
-    if speed <= 0 then
-        writePos(ex, ey, ez)
-        return true
-    end
-
-    local okX, sx = pcall(memory_read, "float", prim + cf + 0x24)
-    local okY, sy = pcall(memory_read, "float", prim + cf + 0x28)
-    local okZ, sz = pcall(memory_read, "float", prim + cf + 0x2C)
-
-    if not (okX and okY and okZ) then
-        writePos(ex, ey, ez)
+    if speed <= 0 or dist < 0.5 then
+        hrp.Position = Vector3.new(ex, ey, ez)
         return true
     end
 
@@ -109,14 +64,11 @@ local function tweenTo(targetPos, speed)
     while os.clock() - t0 < speed do
         local t = math.min((os.clock() - t0) / speed, 1)
         local ep = 1 - (1 - t) ^ 3
-        writePos(
-            sx + (ex - sx) * ep,
-            sy + (ey - sy) * ep,
-            sz + (ez - sz) * ep
-        )
+        local newPos = startPos + (Vector3.new(ex, ey, ez) - startPos) * ep
+        pcall(function() hrp.Position = newPos end)
         task.wait(0.016)
     end
-    writePos(ex, ey, ez)
+    pcall(function() hrp.Position = Vector3.new(ex, ey, ez) end)
     return true
 end
 
@@ -134,13 +86,18 @@ end
 local function cleanAndWait(part)
     local prompt = part:FindFirstChildOfClass("ProximityPrompt")
 
-    -- Read actual HoldDuration from the prompt, fall back to config
     local holdTime = Config.HoldDuration
     if prompt then
         local okH, hd = pcall(function() return prompt.HoldDuration end)
         if okH and type(hd) == "number" and hd > 0 then
             holdTime = hd + 0.1
         end
+    end
+
+    if ppOffset and prompt then
+        pcall(function()
+            memory_write("float", prompt.Address + ppOffset, 0)
+        end)
     end
 
     holdE(holdTime)
@@ -153,7 +110,6 @@ local function cleanAndWait(part)
             return true
         end
     end
-
     return not isCleanable(part)
 end
 
@@ -174,7 +130,7 @@ local function getActivePuddles()
             local okPos, pos = pcall(function() return part.Position end)
             if okPos and pos then
                 local d = myPos and dist3D(myPos, pos) or 9999
-                table.insert(puddles, {part = part, pos = pos, dist = d})
+                table.insert(puddles, { part = part, pos = pos, dist = d })
             end
         end
     end
@@ -183,7 +139,6 @@ local function getActivePuddles()
     return puddles
 end
 
--- Main Loop
 local running = true
 task.spawn(function()
     while running do
@@ -198,17 +153,20 @@ task.spawn(function()
             if not isCleanable(entry.part) then continue end
 
             local success = tweenTo(entry.pos, Config.TweenSpeed)
-            if not success then continue end
+            if not success then
+                local hrp = getHRP()
+                if hrp then
+                    pcall(function() hrp.Position = entry.pos + Vector3.new(0, 3.5, 0) end)
+                end
+            end
 
             task.wait(Config.ArriveDelay)
             if not isCleanable(entry.part) then continue end
-
             cleanAndWait(entry.part)
         end
     end
 end)
 
--- Keybind (J)
 local keybindVK = 0x4A
 local lastPressed = false
 task.spawn(function()
@@ -224,13 +182,12 @@ task.spawn(function()
     end
 end)
 
--- UI
 UI.AddTab("Clean Job", function(tab)
     local sec = tab:Section("Settings", "Left")
     sec:Toggle("cj_enabled", "Enable Auto Clean", Config.Enabled, function(val)
         Config.Enabled = val
     end)
-    sec:SliderFloat("cj_speed", "Tween Speed (seconds)", 0.1, 1.5, Config.TweenSpeed, "%.2f", function(val)
+    sec:SliderFloat("cj_speed", "Tween Speed (s)", 0, 1.5, Config.TweenSpeed, "%.2f", function(val)
         Config.TweenSpeed = val
     end)
     sec:SliderFloat("cj_arrive", "Arrive Delay (s)", 0.0, 1.0, Config.ArriveDelay, "%.2f", function(val)
@@ -242,6 +199,9 @@ UI.AddTab("Clean Job", function(tab)
     sec:SliderFloat("cj_after", "After Clean Delay (s)", 0.0, 1.0, Config.InteractDelay, "%.2f", function(val)
         Config.InteractDelay = val
     end)
+    sec:Toggle("cj_debug", "Debug Notifications", Config.Debug, function(val)
+        Config.Debug = val
+    end)
 
     local sec2 = tab:Section("Misc", "Right")
     sec2:Text("Toggle Key: J")
@@ -252,6 +212,6 @@ UI.AddTab("Clean Job", function(tab)
     end)
 end)
 
-notify("Auto Clean Job v1.1 loaded! Press J to toggle.", "Street Life", 3)
+notify("Auto Clean Job loaded. Press J to toggle.", "Street Life", 3)
 
 while running do task.wait(60) end
