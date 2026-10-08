@@ -1,73 +1,85 @@
-local TP_OFFSET = 3
-local CIRCLE_RADIUS = 3
-local CIRCLE_SPEED = 8
-local CIRCLE_TIME = 1.2
+local TP = 3
+local RADIUS = 3
+local SPEED = 8
+local ORBIT_TIME = 1.2
 local QUICK_TIME = 0.35
-local QUICK_RADIUS = 2
+local QUICK_RAD = 2
 
 local KEEP_X = 0.50
 local KEEP_Y = 0.13
+local KEY = 0x59
 
-local TOGGLE_KEY = 0x59
+local STUCK_THRESHOLD = 3
+local STUCK_TIME = 5
 
 local Players = game:GetService("Players")
 local Workspace = game:GetService("Workspace")
-local LocalPlayer = Players.LocalPlayer
+local Camera = Workspace.CurrentCamera
+local LP = Players.LocalPlayer
 
 local running = false
 local deliveries = 0
 local startTime = tick()
 local startMoney = nil
 local lastMoney = nil
-local earnedThisSession = 0
+local earned = 0
+local hrpCache = nil
+local hrpChar = nil
 
-local function find(parent, name)
-    local c = parent:FindFirstChild(name)
-    local t = tick()
-    while not c and tick() - t < 10 do
+local OFFSETS = {{0,0},{-3,0},{3,0},{0,-3},{0,3}}
+
+local function find(p, n, t)
+    t = t or 10
+    local c = p:FindFirstChild(n)
+    if c then return c end
+    local s = tick()
+    while tick() - s < t do
         wait(0.1)
-        c = parent:FindFirstChild(name)
+        c = p:FindFirstChild(n)
+        if c then return c end
     end
-    return c
 end
 
 local function hrp()
-    local char = LocalPlayer.Character
-    while not char do wait(0.1); char = LocalPlayer.Character end
-    return find(char, "HumanoidRootPart")
+    local char = LP.Character
+    if char == hrpChar and hrpCache then return hrpCache end
+    while not char do wait(0.1); char = LP.Character end
+    local h = find(char, "HumanoidRootPart")
+    hrpChar, hrpCache = char, h
+    return h
 end
 
-local function tp(pos)
-    local h = hrp()
-    if h then h.CFrame = CFrame.new(pos.X, pos.Y + TP_OFFSET, pos.Z) end
+local function teleport(pos, h)
+    h.CFrame = CFrame.new(pos.X, pos.Y + TP, pos.Z)
 end
 
-local function spin(part, radius, duration)
-    local h = hrp()
-    if not h then return end
-    local c = part.Position + Vector3.new(0, TP_OFFSET, 0)
+local function spin(part, radius, duration, h)
+    local px, py, pz = part.Position.X, part.Position.Y + TP, part.Position.Z
     local t0 = tick()
-    while tick() - t0 < duration do
-        local a = (tick() - t0) * CIRCLE_SPEED
-        h.CFrame = CFrame.new(c.X + math.cos(a) * radius, c.Y, c.Z + math.sin(a) * radius)
+    local mt, st = math.cos, math.sin
+    while true do
+        local e = tick() - t0
+        if e >= duration then break end
+        local a = e * SPEED
+        h.CFrame = CFrame.new(px + mt(a) * radius, py, pz + st(a) * radius)
         wait()
     end
-    h.CFrame = CFrame.new(c.X, c.Y, c.Z)
+    h.CFrame = CFrame.new(px, py, pz)
 end
 
 local function jobPart()
-    local p = Workspace:FindFirstChild("Jobs")
-    p = p and p:FindFirstChild("Pizza")
-    p = p and p:FindFirstChild("Parts")
-    return p and p:FindFirstChild("JobPart")
+    local j = Workspace:FindFirstChild("Jobs")
+    j = j and j:FindFirstChild("Pizza")
+    j = j and j:FindFirstChild("Parts")
+    return j and j:FindFirstChild("JobPart")
 end
 
 local function activeDrop()
-    local p = Workspace:FindFirstChild("Jobs")
-    p = p and p:FindFirstChild("Pizza")
-    p = p and p:FindFirstChild("Locations")
-    if not p then return end
-    for _, c in ipairs(p:GetChildren()) do
+    local j = Workspace:FindFirstChild("Jobs")
+    j = j and j:FindFirstChild("Pizza")
+    j = j and j:FindFirstChild("Locations")
+    if not j then return end
+    for _, c in ipairs(j:GetChildren()) do
         if c.Name == "DropLocation" then
             for _, d in ipairs(c:GetChildren()) do
                 if d:IsA("PointLight") then return c end
@@ -76,74 +88,94 @@ local function activeDrop()
     end
 end
 
+local function jobDoneVisible()
+    local pg = LP:FindFirstChild("PlayerGui")
+    local jg = pg and pg:FindFirstChild("JobGui")
+    local jd = jg and jg:FindFirstChild("JobDone")
+    if not jd then return false end
+    local ok, v = pcall(function() return jd.Visible end)
+    if ok and v ~= nil then return v end
+    return true
+end
+
 local function clickAt(px, py)
     mousemoveabs(px, py)
-    wait(0.02)
     mouse1click()
-    wait(0.02)
 end
 
 local function clickKeep()
-    local vp = Workspace.CurrentCamera.ViewportSize
+    local vp = Camera.ViewportSize
     local cx = math.floor(vp.X * KEEP_X)
     local cy = math.floor(vp.Y * KEEP_Y)
-    for _, o in ipairs({{0,0},{-3,0},{3,0},{0,-3},{0,3}}) do
+    for i = 1, 5 do
+        local o = OFFSETS[i]
         clickAt(cx + o[1], cy + o[2])
     end
 end
 
+local function handleKeepGoing()
+    local t0 = tick()
+    while tick() - t0 < 2 do
+        if jobDoneVisible() then break end
+        wait(0.05)
+    end
+    for _ = 1, 4 do
+        clickKeep()
+        wait(0.25)
+        if not jobDoneVisible() then return end
+    end
+end
+
 local function getMoney()
-    local ls = LocalPlayer:FindFirstChild("leaderstats")
+    local ls = LP:FindFirstChild("leaderstats")
     local m = ls and ls:FindFirstChild("Money")
     return m and m.Value or nil
 end
 
-local hud
-
-local function buildHud()
-    hud = Drawing.new("Text")
-    hud.Size = 18
-    hud.Color = Color3.fromRGB(0, 255, 120)
-    hud.Outline = true
-    hud.Center = false
-    hud.Position = Vector2.new(20, 60)
-    hud.Visible = true
-end
+local hud = Drawing.new("Text")
+hud.Size = 18
+hud.Outline = true
+hud.Center = false
+hud.Position = Vector2.new(20, 60)
+hud.Visible = true
 
 local function updateHud()
-    if not hud then return end
     local elapsed = tick() - startTime
     local mins = elapsed / 60
     local hours = mins / 60
-
-    local money = getMoney() or (startMoney or 0) + earnedThisSession
-    local earned = startMoney and (money - startMoney) or earnedThisSession
-
-    local perMin = mins > 0 and earned / mins or 0
-    local perHr  = hours > 0 and earned / hours or 0
-    local avg = deliveries > 0 and earned / deliveries or 0
+    local money = getMoney() or (startMoney or 0) + earned
+    local total = startMoney and (money - startMoney) or earned
+    local perMin = mins > 0 and total / mins or 0
+    local perHr = hours > 0 and total / hours or 0
+    local avg = deliveries > 0 and total / deliveries or 0
 
     hud.Color = running and Color3.fromRGB(0, 255, 120) or Color3.fromRGB(255, 80, 80)
 
     hud.Text = string.format(
-        "[%s]  Y to toggle\nDeliveries: %d\nMoney: $%d\nEarned: $%d\nAvg/delivery: $%d\n$/min: $%d\n$/hr: $%d",
+        "[%s]  Y to toggle\nDeliveries: %d\nMoney: $%d\nEarned: $%d\nAvg: $%d\n$/min: $%d\n$/hr: $%d",
         running and "ON" or "OFF",
-        deliveries, math.floor(money), math.floor(earned),
+        deliveries, math.floor(money), math.floor(total),
         math.floor(avg), math.floor(perMin), math.floor(perHr)
     )
+end
+
+local function resetSession()
+    startTime = tick()
+    startMoney = getMoney() or startMoney
+    lastMoney = startMoney
+    earned = 0
+    deliveries = 0
 end
 
 startMoney = getMoney() or 0
 lastMoney = startMoney
 
-buildHud()
-
 task.spawn(function()
     while true do
         local m = getMoney()
         if m and lastMoney then
-            local delta = m - lastMoney
-            if delta > 0 then earnedThisSession = earnedThisSession + delta end
+            local d = m - lastMoney
+            if d > 0 then earned = earned + d end
             lastMoney = m
         end
         updateHud()
@@ -152,44 +184,61 @@ task.spawn(function()
 end)
 
 task.spawn(function()
-    local wasDown = false
+    local prev = false
     while true do
-        local down = iskeypressed(TOGGLE_KEY)
-        if down and not wasDown then
+        local down = iskeypressed(KEY)
+        if down and not prev then
             running = not running
-            if running then
-                startTime = tick()
-                startMoney = getMoney() or startMoney
-                lastMoney = startMoney
-                earnedThisSession = 0
-                deliveries = 0
-            end
+            if running then resetSession() end
         end
-        wasDown = down
+        prev = down
         wait(0.05)
     end
 end)
 
 task.spawn(function()
+    local lastPos = nil
+    local stillSince = tick()
+
     while true do
         if running then
+            local h = hrp()
+
+            if h then
+                local p = h.Position
+                if lastPos then
+                    local moved = (p - lastPos).Magnitude
+                    if moved < STUCK_THRESHOLD then
+                        if tick() - stillSince > STUCK_TIME then
+                            local red = jobPart()
+                            if red then
+                                teleport(red.Position, h)
+                            end
+                            stillSince = tick()
+                        end
+                    else
+                        stillSince = tick()
+                    end
+                end
+                lastPos = p
+            end
+
             local red = jobPart()
-            if red then
-                tp(red.Position)
-                spin(red, QUICK_RADIUS, QUICK_TIME)
+            if red and h then
+                teleport(red.Position, h)
+                spin(red, QUICK_RAD, QUICK_TIME, h)
             end
 
             local green = activeDrop()
-            if green then
-                tp(green.Position)
+            if green and h then
+                teleport(green.Position, h)
                 wait(0.15)
-                spin(green, CIRCLE_RADIUS, CIRCLE_TIME)
+                spin(green, RADIUS, ORBIT_TIME, h)
                 deliveries = deliveries + 1
             end
 
-            wait(0.5)
-            for _ = 1, 4 do clickKeep(); wait(0.25) end
-            wait(0.15)
+            handleKeepGoing()
+            wait(0.1)
         else
             wait(0.1)
         end
@@ -198,5 +247,5 @@ end)
 
 function stop()
     running = false
-    if hud then hud:Remove() end
+    hud:Remove()
 end
